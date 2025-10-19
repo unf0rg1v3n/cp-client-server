@@ -64,3 +64,62 @@ def generate_large_prime(bits=512):
         candidate = random.getrandbits(bits) | (1 << bits - 1) | 1
         if is_prime(candidate):
             return candidate
+
+
+class RSA:
+    def __init__(self, bits=512):
+        self.p = generate_large_prime(bits)
+        self.q = generate_large_prime(bits)
+        self.n = self.p * self.q
+        self.phi = (self.p - 1) * (self.q - 1)
+        self.e = 65537  # commonly used public exponent
+        self.d = mod_inverse(self.e, self.phi)
+
+    def encrypt(self, message: int) -> int:
+        return mod_pow(message, self.e, self.n)
+
+    def decrypt(self, ciphertext: int) -> int:
+        return mod_pow(ciphertext, self.d, self.n)
+
+    @property
+    def public_key(self):
+        return (self.e, self.n)
+
+    @property
+    def private_key(self):
+        return (self.d, self.n)
+
+    @staticmethod
+    def encrypt_with_public_key(message: int, e: int, n: int) -> int:
+        return mod_pow(message, e, n)
+
+    @staticmethod
+    def split_message(message: str, block_size: int = 32) -> list[bytes]:
+        """Разбивает сообщение на блоки"""
+        message_bytes = message.encode('utf-8')
+        return [message_bytes[i:i + block_size] for i in range(0, len(message_bytes), block_size)]
+
+    @staticmethod
+    def join_message(blocks: list[bytes]) -> str:
+        """Объединяет блоки в сообщение"""
+        return b''.join(blocks).decode('utf-8')
+
+    @staticmethod
+    def encrypt_message(message: str, e: int, n: int) -> list[int]:
+        """Шифрует сообщение, разбивая его на блоки"""
+        blocks = RSA.split_message(message)
+        encrypted_blocks = []
+        for block in blocks:
+            block_int = int.from_bytes(block, 'big')
+            encrypted_blocks.append(RSA.encrypt_with_public_key(block_int, e, n))
+        return encrypted_blocks
+
+    def decrypt_message(self, encrypted_blocks: list[int]) -> str:
+        """Дешифрует сообщение из блоков"""
+        decrypted_blocks = []
+        for block in encrypted_blocks:
+            decrypted_int = self.decrypt(block)
+            # Определяем минимальное количество байт для хранения числа
+            byte_length = (decrypted_int.bit_length() + 7) // 8
+            decrypted_blocks.append(decrypted_int.to_bytes(byte_length, 'big'))
+        return RSA.join_message(decrypted_blocks)

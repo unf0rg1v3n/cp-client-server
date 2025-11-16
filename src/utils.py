@@ -1,125 +1,111 @@
-import random
+import hashlib
+import hmac
+import os
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
+import base64
 
 
-def mod_pow(base, exponent, modulus):
-    result = 1
-    base %= modulus
-    while exponent > 0:
-        if exponent % 2 == 1:
-            result = (result * base) % modulus
-        base = (base * base) % modulus
-        exponent //= 2
-    return result
+def generate_random_bytes(length=32):
+    return os.urandom(length)
 
 
-def gcd(a, b):
-    while b != 0:
-        a, b = b, a % b
-    return a
+def hmac_sha256(key: bytes, message: bytes) -> bytes:
+    return hmac.new(key, message, hashlib.sha256).digest()
 
 
-def mod_inverse(a, m):
-    def extended_gcd(a, b):
-        if b == 0:
-            return a, 1, 0
-        else:
-            g, x, y = extended_gcd(b, a % b)
-            return g, y, x - (a // b) * y
-
-    g, x, _ = extended_gcd(a, m)
-    if g != 1:
-        raise ValueError("Обратного элемента не существует")
-    else:
-        return x % m
+def verify_hmac(key: bytes, message: bytes, expected_hmac: bytes) -> bool:
+    computed_hmac = hmac_sha256(key, message)
+    return hmac.compare_digest(computed_hmac, expected_hmac)
 
 
-def is_prime(n, k=40):
-    if n <= 1 or n == 4:
-        return False
-    if n <= 3:
+class SKID3:
+    
+    def __init__(self, shared_key: bytes):
+        self.shared_key = shared_key
+        self.session_key = None
+        self.ra = None  # Случайное число Alice
+        self.rb = None  # Случайное число Bob
+        
+    def initiate_as_alice(self) -> bytes:
+        self.ra = generate_random_bytes(32)
+        return self.ra
+    
+    def respond_as_bob(self, ra: bytes) -> tuple[bytes, bytes]:
+        self.ra = ra
+        self.rb = generate_random_bytes(32)
+        
+        message = self.ra + self.rb
+        hmac_value = hmac_sha256(self.shared_key, message)
+        
+        return self.rb, hmac_value
+    
+    def verify_and_respond_as_alice(self, rb: bytes, received_hmac: bytes) -> bytes:
+        self.rb = rb
+        
+        message = self.ra + self.rb
+        if not verify_hmac(self.shared_key, message, received_hmac):
+            raise ValueError("Ошибка аутентификации Bob! HMAC не совпадает.")
+        
+        # Вычисляем HMAC(K_AB, R_B || R_A)
+        message = self.rb + self.ra
+        hmac_value = hmac_sha256(self.shared_key, message)
+        
+        # Генерируем сессионный ключ
+        self._generate_session_key()
+        
+        return hmac_value
+    
+    def verify_as_bob(self, received_hmac: bytes) -> bool:
+        message = self.rb + self.ra
+        if not verify_hmac(self.shared_key, message, received_hmac):
+            raise ValueError("Ошибка аутентификации Alice! HMAC не совпадает.")
+        
+        self._generate_session_key()
+        
         return True
-
-    # Представим n-1 как 2^r * d
-    r, d = 0, n - 1
-    while d % 2 == 0:
-        d //= 2
-        r += 1
-
-    for _ in range(k):
-        a = random.randrange(2, n - 2)
-        x = mod_pow(a, d, n)
-        if x == 1 or x == n - 1:
-            continue
-        for _ in range(r - 1):
-            x = mod_pow(x, 2, n)
-            if x == n - 1:
-                break
-        else:
-            return False
-    return True
+    
+    def _generate_session_key(self):
+        message = self.ra + self.rb + b"session"
+        self.session_key = hmac_sha256(self.shared_key, message)
+        
+    def get_session_key(self) -> bytes:
+        if self.session_key is None:
+            raise ValueError("Сессионный ключ еще не установлен!")
+        return self.session_key
 
 
-def generate_large_prime(bits=512):
-    while True:
-        candidate = random.getrandbits(bits) | (1 << bits - 1) | 1
-        if is_prime(candidate):
-            return candidate
+class AESCipher:
+    
+    def __init__(self, key: bytes):
+        self.key = key[:32]
+    
+    def encrypt(self, plaintext: str) -> str:
+        iv = generate_random_bytes(16)
+        
+        cipher = AES.new(self.key, AES.MODE_CBC, iv)
+        
+        plaintext_bytes = plaintext.encode('utf-8')
+        ciphertext = cipher.encrypt(pad(plaintext_bytes, AES.block_size))
+        
+        return base64.b64encode(iv + ciphertext).decode('utf-8')
+    
+    def decrypt(self, ciphertext_b64: str) -> str:
+        data = base64.b64decode(ciphertext_b64)
+        
+        iv = data[:16]
+        ciphertext = data[16:]
+        
+        cipher = AES.new(self.key, AES.MODE_CBC, iv)
+        
+        plaintext_bytes = unpad(cipher.decrypt(ciphertext), AES.block_size)
+        
+        return plaintext_bytes.decode('utf-8')
 
 
-class RSA:
-    def __init__(self, bits=512):
-        self.p = generate_large_prime(bits)
-        self.q = generate_large_prime(bits)
-        self.n = self.p * self.q
-        self.phi = (self.p - 1) * (self.q - 1)
-        self.e = 65537  # commonly used public exponent
-        self.d = mod_inverse(self.e, self.phi)
-
-    def encrypt(self, message: int) -> int:
-        return mod_pow(message, self.e, self.n)
-
-    def decrypt(self, ciphertext: int) -> int:
-        return mod_pow(ciphertext, self.d, self.n)
-
-    @property
-    def public_key(self):
-        return (self.e, self.n)
-
-    @property
-    def private_key(self):
-        return (self.d, self.n)
-
-    @staticmethod
-    def encrypt_with_public_key(message: int, e: int, n: int) -> int:
-        return mod_pow(message, e, n)
-
-    @staticmethod
-    def split_message(message: str, block_size: int = 32) -> list[bytes]:
-        """Разбивает сообщение на блоки"""
-        message_bytes = message.encode('utf-8')
-        return [message_bytes[i:i + block_size] for i in range(0, len(message_bytes), block_size)]
-
-    @staticmethod
-    def join_message(blocks: list[bytes]) -> str:
-        """Объединяет блоки в сообщение"""
-        return b''.join(blocks).decode('utf-8')
-
-    @staticmethod
-    def encrypt_message(message: str, e: int, n: int) -> list[int]:
-        """Шифрует сообщение, разбивая его на блоки"""
-        blocks = RSA.split_message(message)
-        encrypted_blocks = []
-        for block in blocks:
-            block_int = int.from_bytes(block, 'big')
-            encrypted_blocks.append(RSA.encrypt_with_public_key(block_int, e, n))
-        return encrypted_blocks
-
-    def decrypt_message(self, encrypted_blocks: list[int]) -> str:
-        """Дешифрует сообщение из блоков"""
-        decrypted_blocks = []
-        for block in encrypted_blocks:
-            decrypted_int = self.decrypt(block)
-            # Определяем минимальное количество байт для хранения числа
-            byte_length = (decrypted_int.bit_length() + 7) // 8
-            decrypted_blocks.append(decrypted_int.to_bytes(byte_length, 'big'))
-        return RSA.join_message(decrypted_blocks)
+def derive_key_from_password(password: str, salt: bytes = None) -> tuple[bytes, bytes]:
+    if salt is None:
+        salt = os.urandom(16)
+    
+    key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000, dklen=32)
+    return key, salt
